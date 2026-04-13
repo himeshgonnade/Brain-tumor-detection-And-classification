@@ -1,0 +1,51 @@
+# ── Dataset (too large for GitHub) ──────────────────────────────────────────
+data/
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.env
+.venv/
+venv/
+env/
+
+# ── Model weights (large binary — store with Git LFS or link separately) ────
+# Model file is 64 MB — excluded to avoid GitHub push timeouts
+# Train it yourself with: python Ai/Cnn_model.py
+Ai/final_brain_tumor_model.keras
+
+# ── Node / Frontend ──────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.local
+
+# ── Logs ────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── OS files ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ── Temporary files ───────────────────────────────────────────────────────────
+tmp/
+temp/
