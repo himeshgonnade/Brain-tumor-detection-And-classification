@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import './index.css'
 
 const API_URL = 'http://localhost:5000'
@@ -221,11 +221,36 @@ function InfoSection() {
 
 // ── App Root ───────────────────────────────────────────────────────────────
 export default function App() {
-  const [file,     setFile]     = useState(null)
-  const [preview,  setPreview]  = useState(null)
-  const [loading,  setLoading]  = useState(false)
-  const [result,   setResult]   = useState(null)
-  const [error,    setError]    = useState(null)
+  const [file,       setFile]       = useState(null)
+  const [preview,    setPreview]    = useState(null)
+  const [loading,    setLoading]    = useState(false)
+  const [result,     setResult]     = useState(null)
+  const [error,      setError]      = useState(null)
+  const [modelReady, setModelReady] = useState(false)
+  const [modelMsg,   setModelMsg]   = useState('Connecting to AI backend…')
+  const pollRef = useRef(null)
+
+  // Poll /status until the model is ready
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const res  = await fetch(`${API_URL}/status`)
+        const data = await res.json()
+        if (data.ready) {
+          setModelReady(true)
+          setModelMsg('')
+          clearInterval(pollRef.current)
+        } else {
+          setModelMsg(data.message || 'AI model is warming up…')
+        }
+      } catch {
+        setModelMsg('Waiting for backend to start…')
+      }
+    }
+    poll()                                          // run immediately
+    pollRef.current = setInterval(poll, 3000)       // then every 3 s
+    return () => clearInterval(pollRef.current)
+  }, [])
 
   const handleFile = (f) => {
     setFile(f)
@@ -253,7 +278,8 @@ export default function App() {
       fd.append('file', file)
       const res  = await fetch(`${API_URL}/predict`, { method: 'POST', body: fd })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Prediction failed')
+      if (res.status === 503) throw new Error(data.error || 'Model is still loading — please wait and try again.')
+      if (!res.ok)            throw new Error(data.error || 'Prediction failed')
       setResult(data)
     } catch (err) {
       setError(err.message)
@@ -270,7 +296,18 @@ export default function App() {
           <div className="brand-icon">🧠</div>
           <span>Brain<span className="brand-grad">Scan</span> AI</span>
         </a>
-        <span className="navbar-badge">Beta v1.0</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          {!modelReady && (
+            <span className="model-loading-badge">
+              <span className="model-loading-dot" />
+              {modelMsg}
+            </span>
+          )}
+          {modelReady && (
+            <span className="model-ready-badge">✅ Model Ready</span>
+          )}
+          <span className="navbar-badge">Beta v1.0</span>
+        </div>
       </nav>
 
       {/* ── Hero ── */}
@@ -311,8 +348,16 @@ export default function App() {
                 <div className="preview-filename">{file.name}</div>
                 <div className="preview-meta">{(file.size / 1024).toFixed(1)} KB · {file.type}</div>
                 <div className="preview-actions">
-                  <button id="btn-analyse" className="btn-primary" onClick={handlePredict} disabled={loading}>
-                    {loading ? '⏳ Analysing…' : '🔍 Analyse MRI'}
+                  <button
+                    id="btn-analyse"
+                    className="btn-primary"
+                    onClick={handlePredict}
+                    disabled={loading || !modelReady}
+                    title={!modelReady ? modelMsg : ''}
+                  >
+                    {loading      ? '⏳ Analysing…'
+                    : !modelReady ? '⏳ Model Loading…'
+                    :               '🔍 Analyse MRI'}
                   </button>
                   <button className="btn-ghost" onClick={handleReset}>↩ Reset</button>
                 </div>
