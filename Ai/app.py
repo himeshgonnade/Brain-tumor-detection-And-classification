@@ -17,6 +17,9 @@ import traceback
 import zipfile
 import tempfile
 import threading
+import datetime
+import uuid
+import jwt
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.layers import (
@@ -38,14 +41,36 @@ from GRADCAM_heatmap import run_full_gradcam_pipeline
 BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH      = os.path.join(BASE_DIR, "final_brain_tumor_model.keras")
 CLASS_IDX_PATH  = os.path.join(BASE_DIR, "class_indices.json")
+DB_PATH         = os.path.join(BASE_DIR, "mock_db.json")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FLASK APP  (created immediately — before model loads)
 # ─────────────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
+app.config['SECRET_KEY'] = 'super-secret-doctor-key'
 CORS(app, resources={r"/*": {"origins": "*"}})   # allow all origins during dev
 
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "webp"}
+
+def init_db():
+    if not os.path.exists(DB_PATH):
+        with open(DB_PATH, 'w') as f:
+            json.dump({"patients": [], "reports": []}, f)
+
+def read_db():
+    if not os.path.exists(DB_PATH):
+        init_db()
+    try:
+        with open(DB_PATH, 'r') as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        return {"patients": [], "reports": []}
+
+def write_db(data):
+    with open(DB_PATH, 'w') as f:
+        json.dump(data, f, indent=2)
+
+init_db()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GLOBAL MODEL STATE
@@ -189,6 +214,108 @@ def allowed_file(filename):
 # ─────────────────────────────────────────────────────────────────────────────
 # ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
+
+def token_required(f):
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get('Authorization')
+        if not token:
+            return jsonify({'message': 'Token is missing!'}), 401
+        try:
+            token = token.split(" ")[1] # Bearer Token
+            jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
+        except Exception:
+            return jsonify({'message': 'Token is invalid or expired!'}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+@app.route("/api/login", methods=["POST"])
+def login():
+    data = request.get_json()
+    if not data or not data.get('email') or not data.get('password'):
+        return jsonify({'message': 'Missing credentials'}), 400
+    
+    # Mock authentication details
+    if data['email'] == 'doctor@hospital.com' and data['password'] == 'password123':
+        token = jwt.encode({
+            'user': data['email'],
+            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+        }, app.config['SECRET_KEY'], algorithm="HS256")
+        return jsonify({'token': token})
+    return jsonify({'message': 'Invalid credentials'}), 401
+
+@app.route("/api/stats", methods=["GET"])
+@token_required
+def get_stats():
+    db = read_db()
+    patients_count = len(db.get("patients", []))
+    reports = db.get("reports", [])
+    tumors_detected = sum(1 for r in reports if r.get('prediction', '').lower() != 'notumor')
+    normal_cases = sum(1 for r in reports if r.get('prediction', '').lower() == 'notumor')
+    
+    recent_activity = sorted(reports, key=lambda x: x.get('date', ''), reverse=True)[:5]
+    for act in recent_activity:
+        pt = next((p for p in db.get("patients", []) if p.get("id") == act.get("patient_id")), None)
+        act["patient_name"] = pt["name"] if pt else "Unknown"
+    
+    return jsonify({
+        "total_patients": patients_count,
+        "tumors_detected": tumors_detected,
+        "normal_cases": normal_cases,
+        "recent_activity": recent_activity
+    })
+
+@app.route("/api/patients", methods=["GET", "POST"])
+@token_required
+def manage_patients():
+    db = read_db()
+    if request.method == "GET":
+        patients = sorted(db.get("patients", []), key=lambda x: x.get('created_at', ''), reverse=True)
+        return jsonify(patients)
+    
+    if request.method == "POST":
+        data = request.get_json()
+        new_patient = {
+            "id": str(uuid.uuid4())[:8],
+            "name": data.get("name", "Unknown"),
+            "age": data.get("age", 0),
+            "created_at": datetime.datetime.utcnow().isoformat()
+        }
+        db.setdefault("patients", []).append(new_patient)
+        write_db(db)
+        return jsonify(new_patient), 201
+
+@app.route("/api/reports", methods=["GET", "POST"])
+@token_required
+def manage_reports():
+    db = read_db()
+    if request.method == "GET":
+        patient_id = request.args.get("patient_id")
+        reports = db.get("reports", [])
+        if patient_id:
+            reports = [r for r in reports if r.get("patient_id") == patient_id]
+        
+        # Enrich with patient name
+        for r in reports:
+            pt = next((p for p in db.get("patients", []) if p.get("id") == r.get("patient_id")), None)
+            r["patient_name"] = pt["name"] if pt else "Unknown"
+        
+        reports = sorted(reports, key=lambda x: x.get('date', ''), reverse=True)
+        return jsonify(reports)
+
+    if request.method == "POST":
+        data = request.get_json()
+        new_report = {
+            "id": str(uuid.uuid4())[:8],
+            "patient_id": data.get("patient_id"),
+            "prediction": data.get("prediction"),
+            "confidence": data.get("confidence"),
+            "date": datetime.datetime.utcnow().isoformat()
+        }
+        db.setdefault("reports", []).append(new_report)
+        write_db(db)
+        return jsonify(new_report), 201
 
 @app.route("/health", methods=["GET"])
 def health():

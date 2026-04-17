@@ -1,0 +1,58 @@
+{
+  "patients": [
+    {
+      "id": "684014f7",
+      "name": "Rahul Sinha",
+      "age": 30,
+      "created_at": "2026-04-17T14:48:16.184469"
+    },
+    {
+      "id": "d345a969",
+      "name": "Sushant singh",
+      "age": 45,
+      "created_at": "2026-04-17T14:50:57.542431"
+    },
+    {
+      "id": "d33f9487",
+      "name": "Aryan Kumar",
+      "age": 53,
+      "created_at": "2026-04-17T14:51:11.946941"
+    },
+    {
+      "id": "5a4774a4",
+      "name": "Dhanush Kapoor",
+      "age": 28,
+      "created_at": "2026-04-17T14:51:41.346568"
+    }
+  ],
+  "reports": [
+    {
+      "id": "59bfff76",
+      "patient_id": "684014f7",
+      "prediction": "meningioma",
+      "confidence": 0.926108,
+      "date": "2026-04-17T14:49:13.566960"
+    },
+    {
+      "id": "7fb4f97e",
+      "patient_id": "d345a969",
+      "prediction": "pituitary",
+      "confidence": 0.921916,
+      "date": "2026-04-17T14:52:24.647955"
+    },
+    {
+      "id": "99e0e075",
+      "patient_id": "d33f9487",
+      "prediction": "glioma",
+      "confidence": 0.928648,
+      "date": "2026-04-17T14:53:03.052227"
+    },
+    {
+      "id": "551104ff",
+      "patient_id": "5a4774a4",
+      "prediction": "notumor",
+      "confidence": 0.921861,
+      "date": "2026-04-17T14:54:00.051904"
+    }
+  ]
+}
