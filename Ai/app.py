@@ -254,8 +254,8 @@ def get_stats():
     tumors_detected = sum(1 for r in reports if r.get('prediction', '').lower() != 'notumor')
     normal_cases = sum(1 for r in reports if r.get('prediction', '').lower() == 'notumor')
     
-    recent_activity = sorted(reports, key=lambda x: x.get('date', ''), reverse=True)[:5]
-    for act in recent_activity:
+    all_activity = sorted(reports, key=lambda x: x.get('date', ''), reverse=True)
+    for act in all_activity:
         pt = next((p for p in db.get("patients", []) if p.get("id") == act.get("patient_id")), None)
         act["patient_name"] = pt["name"] if pt else "Unknown"
     
@@ -263,7 +263,7 @@ def get_stats():
         "total_patients": patients_count,
         "tumors_detected": tumors_detected,
         "normal_cases": normal_cases,
-        "recent_activity": recent_activity
+        "recent_activity": all_activity
     })
 
 @app.route("/api/patients", methods=["GET", "POST"])
@@ -311,6 +311,9 @@ def manage_reports():
             "patient_id": data.get("patient_id"),
             "prediction": data.get("prediction"),
             "confidence": data.get("confidence"),
+            "heatmap_b64": data.get("heatmap_b64"),
+            "overlay_b64": data.get("overlay_b64"),
+            "original_b64": data.get("original_b64"),
             "date": datetime.datetime.utcnow().isoformat()
         }
         db.setdefault("reports", []).append(new_report)

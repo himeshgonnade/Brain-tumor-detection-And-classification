@@ -1,6 +1,6 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { BrainCircuit, LayoutDashboard, Users, FileBarChart, LogOut, ScanLine } from 'lucide-react';
+import { BrainCircuit, LayoutDashboard, Users, FileBarChart, LogOut, ScanLine, History } from 'lucide-react';
 
 export default function DashboardLayout() {
   const { user, logout } = useAuth();
@@ -36,6 +36,10 @@ export default function DashboardLayout() {
           <NavLink to="/dashboard/reports" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
             <FileBarChart size={20} />
             Reports
+          </NavLink>
+          <NavLink to="/dashboard/history" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+            <History size={20} />
+            Activity History
           </NavLink>
         </nav>
 

@@ -6,6 +6,7 @@ import Overview from './pages/Overview';
 import Patients from './pages/Patients';
 import TumorDetection from './pages/TumorDetection';
 import Reports from './pages/Reports';
+import History from './pages/History';
 import './index.css';
 import './App.css'; // Adding app specific styles if any
 
@@ -39,6 +40,7 @@ export default function App() {
             <Route path="patients" element={<Patients />} />
             <Route path="detection" element={<TumorDetection />} />
             <Route path="reports" element={<Reports />} />
+            <Route path="history" element={<History />} />
           </Route>
 
           {/* Fallback */}

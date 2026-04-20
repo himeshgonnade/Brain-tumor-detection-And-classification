@@ -117,6 +117,18 @@ def make_gradcam_heatmap(img_array, ensemble_model, pred_index=None):
     heatmap = np.maximum(heatmap, 0)      # ReLU
     if heatmap.max() > 0:
         heatmap /= heatmap.max()
+        
+        # --- Enhance Focus on Tumor Region ---
+        # 1. Zero out diffuse background noise (e.g., anything below 40% of the maximum)
+        heatmap = np.where(heatmap < 0.4, 0, heatmap)
+        
+        # 2. Smooth the remaining strong activations to form a cohesive blob
+        heatmap = cv2.GaussianBlur(heatmap.astype(np.float32), (15, 15), 0)
+        
+        # 3. Renormalize to ensure the peak is 1.0
+        p_max = heatmap.max()
+        if p_max > 0:
+            heatmap /= p_max
 
     return heatmap, pred_index, full_preds[0].numpy()
 

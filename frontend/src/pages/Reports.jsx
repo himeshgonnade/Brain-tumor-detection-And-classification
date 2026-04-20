@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { Download, FileText, Brain } from 'lucide-react';
 
+import { generatePDFReport } from '../utils/pdfGenerator';
+
 export default function Reports() {
   const { token } = useAuth();
   const [reports, setReports] = useState([]);
@@ -25,27 +27,7 @@ export default function Reports() {
   }, [token]);
 
   const handleDownload = (report) => {
-    // Generate a simple PDF or text file for download
-    const content = `BrainScan AI - Medical Report
---------------------------------------
-Patient Name: ${report.patient_name}
-Scan Date: ${new Date(report.date).toLocaleString()}
-Report ID: ${report.id}
-
-AI Diagnostic Result
---------------------------------------
-Prediction: ${report.prediction.toUpperCase()}
-Confidence: ${(report.confidence * 100).toFixed(2)}%
-
-Note: This is an AI generated summary. Please review with an oncologist.
-`;
-    
-    const blob = new Blob([content], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `Report_${report.patient_name.replace(' ', '_')}_${report.id}.txt`;
-    a.click();
+    generatePDFReport(report, report.patient_name);
   };
 
   return (

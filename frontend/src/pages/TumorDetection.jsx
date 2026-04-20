@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { generatePDFReport } from '../utils/pdfGenerator';
+import { Download } from 'lucide-react';
 
 const API_URL = 'http://localhost:5000';
 
@@ -298,7 +300,10 @@ export default function TumorDetection() {
         body: JSON.stringify({
           patient_id: patientId,
           prediction: result.prediction,
-          confidence: result.confidence
+          confidence: result.confidence,
+          heatmap_b64: result.heatmap_b64,
+          overlay_b64: result.overlay_b64,
+          original_b64: result.original_b64
         })
       });
       if(res.ok) {
@@ -392,6 +397,18 @@ export default function TumorDetection() {
                     ✅ Report successfully saved to patient record!
                  </div>
               )}
+              
+              <div className="mt-4 flex justify-end">
+                <button 
+                  onClick={() => {
+                     const selectedPatient = patients.find((p) => p.id === patientId);
+                     generatePDFReport(result, selectedPatient ? selectedPatient.name : "Unknown Patient");
+                  }} 
+                  className="btn-ghost flex items-center gap-2 text-sm"
+                >
+                  <Download size={16} /> Download PDF Report
+                </button>
+              </div>
             </div>
           )}
         </div>
