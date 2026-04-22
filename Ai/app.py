@@ -364,7 +364,7 @@ def predict():
 
     try:
         img_bytes = file.read()
-        result    = run_full_gradcam_pipeline(img_bytes, model)
+        result    = run_full_gradcam_pipeline(img_bytes, model, class_names=CLASS_NAMES)
 
         pred_idx   = result["pred_index"]
         probs      = result["probabilities"]

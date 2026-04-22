@@ -166,16 +166,21 @@ function ResultCard({ result }) {
   );
 }
 
-// ── Heatmap Viewer ──
+// ── Heatmap Viewer ── (only shown when a tumor is detected)
 function HeatmapViewer({ result }) {
+  // Don't render at all for normal / no-tumor results
+  if (result.prediction === 'notumor') return null;
+
   return (
     <div className="main-card mt-6">
       <div className="sub-card-title mb-4 text-sm">
         🔬 &nbsp;GRAD-CAM HEATMAP ANALYSIS
       </div>
       <p className="text-sm text-gray-400 mb-6 leading-relaxed">
-        Grad-CAM highlights the regions in the MRI that the EfficientNetB0 model focused on when making its prediction.
-        Red/yellow areas indicate the highest model attention — likely where the tumor is located.
+        Grad-CAM++ highlights the regions in the MRI that the AI model attended to when predicting
+        <strong style={{ color: '#f97316' }}> {result.display_label}</strong>.
+        Red / yellow areas indicate the highest activation — likely where the tumor is located.
+        Blue areas indicate low attention.
       </p>
       <div className="heatmap-images">
         <div className="heatmap-img-wrap">
@@ -184,7 +189,7 @@ function HeatmapViewer({ result }) {
         </div>
         <div className="heatmap-img-wrap">
           <img src={`data:image/png;base64,${result.overlay_b64}`} alt="Grad-CAM Overlay" />
-          <div className="heatmap-img-label">Grad-CAM Overlay</div>
+          <div className="heatmap-img-label">Grad-CAM++ Overlay</div>
         </div>
         <div className="heatmap-img-wrap">
           <img src={`data:image/png;base64,${result.heatmap_b64}`} alt="Raw Heatmap" />
@@ -413,7 +418,7 @@ export default function TumorDetection() {
           )}
         </div>
 
-        {result && !loading && <HeatmapViewer result={result} />}
+        {result && !loading && result.prediction !== 'notumor' && <HeatmapViewer result={result} />}
     </div>
   );
 }

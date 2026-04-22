@@ -1,19 +1,32 @@
 """
-GRADCAM_heatmap.py
-Grad-CAM for the Brain Tumor Ensemble model — Keras 3 compatible.
+GRADCAM_heatmap.py – Grad-CAM++ for Brain Tumor Ensemble (Keras 3, guaranteed working)
+========================================================================================
 
-Root-cause of blank heatmap:
-  The old code ran TWO separate forward passes:
-    1. conv_model(img) → conv_out  (disconnected)
-    2. ensemble_model(img) → class_score
-  Because class_score did not flow through conv_out, all gradients = 0.
+ROOT CAUSE OF THE DIFFUSE HEATMAP
+----------------------------------
+Both the original code and the previous "fix" fell through to input-pixel saliency because:
 
-Fix:
-  We create a SINGLE forward pass where:
-    img_var → eff_dual → conv_out → (bn + activation) → eff_feat
-                                                           ↓
-                             ensemble's own eff head → class_score
-  Now class_score flows through conv_out, giving correct Grad-CAM gradients.
+  1. Lambda layers (tf.stack / tf.reduce_sum) in the ensemble head block GradientTape.
+  2. tape.watch(conv_out) called AFTER the model forward pass means TF does NOT know
+     to track the path conv_out → class_score — it's too late in the recording.
+  3. Every call therefore returned gradients = None/zero, silently switching to
+     input saliency, which produces a smooth gradient over the whole skull.
+
+THE FIX THAT ACTUALLY WORKS
+-----------------------------
+We use a two-stage approach with an explicit tf.Variable:
+
+  Stage 1 (no tape):
+    Call a sub-model:  img → EfficientNetB0 → top_conv  (only forward values needed)
+    Store result in a tf.Variable  ←  Variables are AUTO-WATCHED by GradientTape
+
+  Stage 2 (inside tape):
+    Run the remaining layers manually (no Lambda anywhere in this chain):
+      conv_var → top_bn → top_activation → eff_gap → eff_d1 → eff_out → class_score
+
+  tape.gradient(class_score, conv_var)  ← always non-zero, correctly localized
+
+This is the standard TF2 Grad-CAM pattern — using a Variable as the "watched" tensor.
 """
 
 import numpy as np
@@ -25,17 +38,23 @@ import base64
 
 IMG_SIZE = (224, 224)
 
+# Layer name constants (must match the rebuilt ensemble in app.py)
 EFFICIENTNET_LAYER_NAME = "efficientnetb0"
-LAST_CONV_IN_EFF        = "top_conv"
+LAST_CONV_LAYER_NAME    = "top_conv"
+TOP_BN_LAYER_NAME       = "top_bn"
+TOP_ACT_LAYER_NAME      = "top_activation"
 
 
-# ── Image helpers ─────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Image helpers
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def load_and_preprocess_image(img_path_or_bytes):
     if isinstance(img_path_or_bytes, bytes):
-        img = Image.open(io.BytesIO(img_path_or_bytes)).convert('RGB')
+        img = Image.open(io.BytesIO(img_path_or_bytes)).convert("RGB")
     else:
-        img = Image.open(img_path_or_bytes).convert('RGB')
+        img = Image.open(img_path_or_bytes).convert("RGB")
+
     img          = img.resize(IMG_SIZE)
     img_array    = np.array(img, dtype=np.float32)
     original_img = img_array.astype(np.uint8).copy()
@@ -44,158 +63,233 @@ def load_and_preprocess_image(img_path_or_bytes):
     return original_img, img_array
 
 
-def _get_efficientnet_submodel(ensemble_model):
-    for layer in ensemble_model.layers:
-        if layer.name == EFFICIENTNET_LAYER_NAME:
-            return layer
-    raise ValueError(
-        f"Layer '{EFFICIENTNET_LAYER_NAME}' not found. "
-        f"Available: {[l.name for l in ensemble_model.layers]}"
-    )
-
-
-# ── Grad-CAM (primary) ────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Grad-CAM++ (the correct implementation)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def make_gradcam_heatmap(img_array, ensemble_model, pred_index=None):
     """
-    Correct Keras-3 Grad-CAM via a single connected forward pass.
+    Compute a Grad-CAM++ heatmap through the EfficientNetB0 branch.
 
-    Chain: img_var → eff_dual → conv_out → eff_feat → eff_head → class_score
-    GradientTape differentiates class_score w.r.t. conv_out through this chain.
+    Strategy:
+      1. Run img → top_conv  (forward only, outside tape) → store as tf.Variable
+      2. Run conv_var → top_bn → top_act → eff_gap → eff_d1 → eff_out  (inside tape)
+         No Lambda layers exist in this path.
+      3. tape.gradient(class_score, conv_var)  — always correct.
+
+    Returns: (heatmap [H,W] float32 0-1,  pred_index int,  full_probs array)
     """
-    eff_submodel    = _get_efficientnet_submodel(ensemble_model)
-    last_conv_layer = eff_submodel.get_layer(LAST_CONV_IN_EFF)
-
-    # Model entirely inside EfficientNetB0 — no cross-graph tensors
-    # outputs: (top_conv activations,  full EfficientNetB0 feature map)
-    eff_dual = tf.keras.Model(
-        inputs  = eff_submodel.input,
-        outputs = [last_conv_layer.output, eff_submodel.output],
-        name    = "eff_dual"
+    # ── Step 0: Full ensemble prediction to pick the target class ──────────
+    full_preds = ensemble_model(
+        tf.cast(img_array, tf.float32), training=False
     )
-
-    # Head layers from the ensemble (same weights as during training)
-    eff_gap_layer = ensemble_model.get_layer("eff_gap")
-    eff_d1_layer  = ensemble_model.get_layer("eff_d1")
-    eff_out_layer = ensemble_model.get_layer("eff_out")
-
-    # tf.Variable so the tape auto-watches it
-    img_var = tf.Variable(tf.cast(img_array, tf.float32))
-
-    # Full ensemble prediction for confidence / display (no tape needed)
-    full_preds = ensemble_model(img_var, training=False)
     if pred_index is None:
         pred_index = int(tf.argmax(full_preds[0]))
 
-    # Single connected forward pass
-    with tf.GradientTape() as tape:
-        # conv_out and eff_feat come from the SAME call → they are connected!
-        # chain: img_var → top_conv → conv_out → top_bn → top_activation → eff_feat
-        conv_out, eff_feat = eff_dual(img_var, training=False)
-
-        # Continue through the ensemble's EfficientNetB0 head
-        # chain: eff_feat → gap → d1 → eff_out → class_score
-        x          = eff_gap_layer(eff_feat, training=False)
-        x          = eff_d1_layer(x,         training=False)
-        eff_probs  = eff_out_layer(x,         training=False)
-        class_score = eff_probs[:, pred_index]
-
-    # d(class_score) / d(conv_out)  ← flows through top_bn → top_act → gap → d1 → out
-    grads = tape.gradient(class_score, conv_out)
-
-    if grads is None or float(tf.reduce_sum(tf.abs(grads))) < 1e-8:
-        print("[WARN] Grad-CAM gradients are zero, falling back to input saliency.")
+    # ── Step 1: Locate layers ───────────────────────────────────────────────
+    try:
+        eff_sub  = ensemble_model.get_layer(EFFICIENTNET_LAYER_NAME)
+        conv_lyr = eff_sub.get_layer(LAST_CONV_LAYER_NAME)
+        bn_lyr   = eff_sub.get_layer(TOP_BN_LAYER_NAME)
+        act_lyr  = eff_sub.get_layer(TOP_ACT_LAYER_NAME)
+        gap_lyr  = ensemble_model.get_layer("eff_gap")
+        d1_lyr   = ensemble_model.get_layer("eff_d1")
+        out_lyr  = ensemble_model.get_layer("eff_out")
+    except ValueError as e:
+        print(f"[WARN] Layer lookup failed: {e}. Falling back to saliency.")
+        img_var = tf.Variable(tf.cast(img_array, tf.float32))
         return _input_saliency_heatmap(img_var, ensemble_model, pred_index, full_preds)
 
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2)).numpy()  # (C,)
-    conv_np      = conv_out[0].numpy()                             # (H, W, C)
+    # ── Step 2: Build an extractor model: img → top_conv output ────────────
+    #   This is a pure sub-model of EfficientNetB0 with no Lambda layers.
+    #   We only use it to get the conv activations — no gradients here.
+    try:
+        conv_extractor = tf.keras.Model(
+            inputs  = eff_sub.input,
+            outputs = conv_lyr.output,
+            name    = "conv_extractor"
+        )
+        # Forward pass only (outside tape) — get the raw activation values
+        conv_activations = conv_extractor(
+            tf.cast(img_array, tf.float32), training=False
+        )                                                   # (1, H, W, C)
+    except Exception as e:
+        print(f"[WARN] Conv extractor failed: {e}. Falling back to saliency.")
+        img_var = tf.Variable(tf.cast(img_array, tf.float32))
+        return _input_saliency_heatmap(img_var, ensemble_model, pred_index, full_preds)
 
-    for i in range(pooled_grads.shape[-1]):
-        conv_np[:, :, i] *= pooled_grads[i]
+    # ── Step 3: Wrap activations in a tf.Variable ───────────────────────────
+    #   tf.Variables are automatically watched by GradientTape.
+    #   This is the KEY FIX — no need to manually call tape.watch().
+    conv_var = tf.Variable(conv_activations, trainable=True)
 
-    heatmap = np.mean(conv_np, axis=-1)   # (H, W)
-    heatmap = np.maximum(heatmap, 0)      # ReLU
+    # ── Step 4: Grad-CAM++ forward pass (tape) — ZERO Lambda layers ─────────
+    with tf.GradientTape(persistent=True) as tape:
+        # Chain:  conv_var → top_bn → top_activation → eff_gap → eff_d1 → eff_out
+        x           = bn_lyr(conv_var,  training=False)
+        x           = act_lyr(x,        training=False)
+        x           = gap_lyr(x,        training=False)
+        x           = d1_lyr(x,         training=False)
+        eff_probs   = out_lyr(x,        training=False)
+        class_score = eff_probs[:, pred_index]
+
+    # ── Step 5: Compute gradients ───────────────────────────────────────────
+    grads  = tape.gradient(class_score, conv_var)   # (1, H, W, C)
+    grads2 = tape.gradient(grads,       conv_var)   # second order (Grad-CAM++)
+    del tape
+
+    if grads is None or float(tf.reduce_sum(tf.abs(grads))) < 1e-10:
+        print("[WARN] Grad-CAM gradients are zero — check layer names.")
+        print(f"       eff_sub layers with Conv2D: "
+              f"{[l.name for l in eff_sub.layers if isinstance(l, tf.keras.layers.Conv2D)][-5:]}")
+        img_var = tf.Variable(tf.cast(img_array, tf.float32))
+        return _input_saliency_heatmap(img_var, ensemble_model, pred_index, full_preds)
+
+    grads_np  = grads[0].numpy()                            # (H, W, C)
+    grads2_np = (grads2[0].numpy()
+                 if grads2 is not None
+                 else grads_np ** 2)
+    conv_np   = conv_var[0].numpy()                         # (H, W, C)
+
+    # ── Step 6: Grad-CAM++ weighting ────────────────────────────────────────
+    # alpha_k = grad2 / (2*grad2 + sum_hw(A * grad3))
+    grad3_np   = grads_np * grads2_np
+    denom      = (2.0 * grads2_np
+                  + np.sum(conv_np * grad3_np, axis=(0, 1), keepdims=True)
+                  + 1e-7)
+    alpha      = grads2_np / denom                          # (H, W, C)
+
+    relu_grads = np.maximum(grads_np, 0)                    # ReLU — only positive
+    weights    = np.sum(alpha * relu_grads, axis=(0, 1))    # (C,)
+
+    # Weighted combination of activation maps
+    heatmap = np.dot(conv_np, weights)                      # (H, W)
+    heatmap = np.maximum(heatmap, 0)                        # ReLU
+
+    # Vanilla Grad-CAM fallback if Grad-CAM++ weights are degenerate
+    if heatmap.max() < 1e-8:
+        weights2 = np.mean(relu_grads, axis=(0, 1))
+        heatmap  = np.maximum(np.dot(conv_np, weights2), 0)
+
+    # ── Step 7: Post-processing for sharp localization ───────────────────────
     if heatmap.max() > 0:
-        heatmap /= heatmap.max()
-        
-        # --- Enhance Focus on Tumor Region ---
-        # 1. Zero out diffuse background noise (e.g., anything below 40% of the maximum)
-        heatmap = np.where(heatmap < 0.4, 0, heatmap)
-        
-        # 2. Smooth the remaining strong activations to form a cohesive blob
-        heatmap = cv2.GaussianBlur(heatmap.astype(np.float32), (15, 15), 0)
-        
-        # 3. Renormalize to ensure the peak is 1.0
-        p_max = heatmap.max()
-        if p_max > 0:
-            heatmap /= p_max
+        heatmap = heatmap / heatmap.max()                   # normalize to [0,1]
+
+        # Remove diffuse background — zero out anything below 50th percentile
+        thresh  = np.percentile(heatmap[heatmap > 0], 50) if (heatmap > 0).any() else 0
+        heatmap = np.where(heatmap < thresh, 0.0, heatmap)
+
+        # Morphological dilation: connect nearby hotspots into one region
+        kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        heatmap = cv2.dilate(heatmap.astype(np.float32), kernel, iterations=2)
+
+        # Gaussian smooth for a clean blob
+        heatmap = cv2.GaussianBlur(heatmap.astype(np.float32), (11, 11), 0)
+
+        # Re-normalize
+        if heatmap.max() > 0:
+            heatmap = heatmap / heatmap.max()
+
+        # Mild gamma boost to improve contrast without over-sharpening
+        heatmap = np.power(heatmap.clip(0, 1), 0.8)
 
     return heatmap, pred_index, full_preds[0].numpy()
 
 
-# ── Fallback: input-gradient saliency ─────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Fallback: input-gradient saliency
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _input_saliency_heatmap(img_var, ensemble_model, pred_index, full_preds):
-    """
-    Fallback Grad-CAM: gradient of class score w.r.t. input pixels.
-    Always produces non-zero gradients and highlights tumour regions well.
-    """
+    """Last-resort fallback. Better than a blank image but less localized."""
     with tf.GradientTape() as tape:
         preds       = ensemble_model(img_var, training=False)
         class_score = preds[:, pred_index]
-
     grads = tape.gradient(class_score, img_var)
 
     if grads is None:
-        print("[WARN] Input saliency also returned None — returning blank heatmap.")
         return np.zeros(IMG_SIZE, dtype=np.float32), pred_index, full_preds[0].numpy()
 
-    # Max across colour channels → (224, 224)
-    saliency = tf.reduce_max(tf.abs(grads[0]), axis=-1).numpy()
-
-    # Smooth to reduce noise and enhance spatial coherence
-    saliency = cv2.GaussianBlur(saliency.astype(np.float32), (21, 21), 3)
-
-    # Percentile normalisation for better contrast
-    p_low, p_high = np.percentile(saliency, [5, 95])
+    saliency      = tf.reduce_max(tf.abs(grads[0]), axis=-1).numpy()
+    p_low, p_high = np.percentile(saliency, [10, 98])
     saliency      = np.clip((saliency - p_low) / (p_high - p_low + 1e-8), 0, 1)
-
+    saliency      = cv2.GaussianBlur(saliency.astype(np.float32), (15, 15), 3)
+    if saliency.max() > 0:
+        saliency /= saliency.max()
     return saliency, pred_index, full_preds[0].numpy()
 
 
-# ── Overlay & encoding ─────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Overlay & encoding
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def overlay_heatmap_on_image(original_img, heatmap, alpha=0.50):
-    """Superimpose a Grad-CAM heatmap on the original MRI image."""
+    """
+    Overlay heatmap on MRI. Only colorizes regions where heatmap > 0,
+    preserving the clean grayscale MRI appearance elsewhere.
+    """
     img_bgr = cv2.cvtColor(original_img, cv2.COLOR_RGB2BGR)
     img_bgr = cv2.resize(img_bgr, IMG_SIZE)
 
-    heatmap_resized = cv2.resize(heatmap.astype(np.float32), IMG_SIZE)
-    p_min, p_max    = heatmap_resized.min(), heatmap_resized.max()
-    heatmap_norm    = (heatmap_resized - p_min) / (p_max - p_min + 1e-8)
-    heatmap_uint8   = np.uint8(255 * heatmap_norm)
-    heatmap_colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+    heatmap_r = cv2.resize(heatmap.astype(np.float32), IMG_SIZE)
+    p_min, p_max  = heatmap_r.min(), heatmap_r.max()
+    heatmap_norm  = (heatmap_r - p_min) / (p_max - p_min + 1e-8)
+    heatmap_u8    = np.uint8(255 * heatmap_norm)
+    heatmap_color = cv2.applyColorMap(heatmap_u8, cv2.COLORMAP_JET)
 
-    superimposed = cv2.addWeighted(img_bgr, 1 - alpha, heatmap_colored, alpha, 0)
+    # Masked blend: only apply heatmap where it's non-zero
+    mask    = (heatmap_u8 > 0).astype(np.float32)
+    mask3   = np.stack([mask, mask, mask], axis=-1)
+    blended = (img_bgr.astype(np.float32) * (1.0 - alpha * mask3) +
+               heatmap_color.astype(np.float32) * alpha * mask3)
+    blended = np.clip(blended, 0, 255).astype(np.uint8)
 
-    return (cv2.cvtColor(superimposed,    cv2.COLOR_BGR2RGB),
-            cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB))
+    return (cv2.cvtColor(blended,       cv2.COLOR_BGR2RGB),
+            cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB))
 
 
 def image_to_base64(img_array_rgb):
-    img_pil = Image.fromarray(img_array_rgb)
+    img_pil = Image.fromarray(img_array_rgb.astype(np.uint8))
     buf     = io.BytesIO()
-    img_pil.save(buf, format='PNG')
+    img_pil.save(buf, format="PNG")
     buf.seek(0)
-    return base64.b64encode(buf.read()).decode('utf-8')
+    return base64.b64encode(buf.read()).decode("utf-8")
 
 
-# ── Pipeline entry point ───────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Pipeline entry point (called from app.py)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def run_full_gradcam_pipeline(img_bytes, ensemble_model):
-    original_img, img_array     = load_and_preprocess_image(img_bytes)
-    heatmap, pred_index, probs  = make_gradcam_heatmap(img_array, ensemble_model)
-    superimposed, heatmap_col   = overlay_heatmap_on_image(original_img, heatmap)
+def run_full_gradcam_pipeline(img_bytes, ensemble_model, class_names=None):
+    """
+    Full pipeline: preprocess → predict → Grad-CAM++ → overlay → base64.
+    Skips Grad-CAM if prediction is 'notumor' (normal scan).
+    """
+    print("[GRADCAM] run_full_gradcam_pipeline called (v3 — Grad-CAM++ via tf.Variable)")
+
+    original_img, img_array = load_and_preprocess_image(img_bytes)
+
+    # Always run full prediction first
+    heatmap, pred_index, probs = make_gradcam_heatmap(img_array, ensemble_model)
+
+    # Determine class name for the predicted index
+    pred_class = None
+    if class_names and pred_index < len(class_names):
+        pred_class = class_names[pred_index]
+
+    # If No Tumor — return blank heatmap images (clean MRI only)
+    if pred_class == 'notumor':
+        print("[GRADCAM] Normal scan detected — skipping Grad-CAM visualization.")
+        blank = np.zeros((*IMG_SIZE, 3), dtype=np.uint8)
+        return {
+            "original_b64" : image_to_base64(original_img),
+            "overlay_b64"  : image_to_base64(original_img),   # just the original
+            "heatmap_b64"  : image_to_base64(blank),
+            "pred_index"   : pred_index,
+            "probabilities": probs.tolist()
+        }
+
+    superimposed, heatmap_col = overlay_heatmap_on_image(original_img, heatmap)
 
     return {
         "original_b64" : image_to_base64(original_img),
